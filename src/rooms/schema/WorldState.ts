@@ -27,7 +27,7 @@ export const PlayerState = schema(
     gz: t.float64().default(0),
     held: t.boolean().default(false), // in Grandpa's hand
     out: t.boolean().default(false), // out of the heist (caged too long): spectating
-    // Server-set only (pads.ts): "lobby", or "h<pad index>" while in that pad's heist. Clients draw
+    // Server-set only (pads.ts): "lobby", or "h<heist id>" while in that heist. Clients draw
     // only the players in their own zone.
     zone: t.string().default("lobby"),
     escapes: t.uint16().default(0), // heists escaped this session (server-counted `escaped`)
@@ -36,29 +36,40 @@ export const PlayerState = schema(
 );
 export type PlayerState = SchemaType<typeof PlayerState>;
 
-// One crew pad (a giant bottle cap in the lobby) and the heist its crew is running (pads.ts).
+// One crew pad (a giant bottle cap in the lobby): who waits on it and when it launches (pads.ts). The
+// heist it launches is a separate HeistState, so the pad is free for the next crew at once.
 export const PadState = schema(
   {
     index: t.uint8().default(0), // 0..PAD_COUNT-1
     difficulty: t.string().default("normal"), // "normal" (every pad); the type allows hard | nightmare
     members: t.array("string"), // session ids waiting on the pad (max PAD_SIZE)
     startsAt: t.float64().default(0), // server epoch ms the heist launches at (0 = idle)
-    running: t.boolean().default(false), // a heist is in progress
-    crew: t.array("string"), // session ids in the heist
-    host: t.string().default(""), // session id running Grandpa + the physics for the crew
-    seed: t.uint32().default(0), // the heist's random seed (loot, jobs, Grandpa)
-    money: t.float64().default(0), // the crew bank ($ stolen so far, host-reported `steal`)
-    target: t.uint32().default(0), // the bank needed to escape (by difficulty)
-    heistId: t.string().default(""), // id of the running heist ("" = none)
   },
   "PadState",
 );
 export type PadState = SchemaType<typeof PadState>;
 
+// One running heist (pads.ts). Lives from the pad's launch until its last crew member leaves.
+export const HeistState = schema(
+  {
+    id: t.string().default(""), // heist id; the crew's zone is "h<id>"
+    pad: t.uint8().default(0), // the pad it launched from (informational)
+    difficulty: t.string().default("normal"),
+    crew: t.array("string"), // session ids in the heist
+    host: t.string().default(""), // session id running Grandpa + the physics for the crew
+    seed: t.uint32().default(0), // the heist's random seed (loot, jobs, Grandpa)
+    money: t.float64().default(0), // the crew bank ($ stolen so far, host-reported `steal`)
+    target: t.uint32().default(0), // the bank needed to escape (by difficulty)
+  },
+  "HeistState",
+);
+export type HeistState = SchemaType<typeof HeistState>;
+
 export const WorldState = schema(
   {
     players: t.map(PlayerState), // keyed by sessionId
     pads: t.array(PadState), // PAD_COUNT pads, created with the room
+    heists: t.array(HeistState), // the heists running now (any number: a pad is free again at launch)
   },
   "WorldState",
 );
