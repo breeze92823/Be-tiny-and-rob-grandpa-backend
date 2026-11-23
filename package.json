@@ -1,8 +1,8 @@
 {
   "private": true,
-  "name": "bowling-roll-server",
+  "name": "be-tiny-and-rob-grandpa-server",
   "version": "0.1.0",
-  "description": "Colyseus server for Bowling Roll: progress saving and the room roster",
+  "description": "Colyseus server for Tiny Thieves: Grandpa's House: progress saving, the lobby pads and the heist relay",
   "type": "module",
   "main": "build/index.js",
   "engines": {

@@ -5,7 +5,7 @@ import { WorldRoom } from "./rooms/WorldRoom.js";
 import { MAX_PAYLOAD_BYTES } from "./constants.js";
 
 const server = defineServer({
-  // saveProgress carries the owned boats/engines/trails/pets, over the default 4 KB message cap.
+  // The host's heist snapshot (`hs`, up to 24 KB) and the save are over the default 4 KB message cap.
   transport: new WebSocketTransport({ maxPayload: MAX_PAYLOAD_BYTES }),
 
   rooms: {

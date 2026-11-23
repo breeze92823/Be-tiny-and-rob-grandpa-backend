@@ -1,46 +1,43 @@
-import { AVATAR_MAX_LEN, ID_PATTERN, POSE_BOUNDS, PRESENCE_PETS_MAX, PET_TIERS_MAX } from "./constants.js";
+import { AVATAR_MAX_LEN, ID_PATTERN, POSE_BOUNDS } from "./constants.js";
 import type { PlayerState } from "./rooms/schema/WorldState.js";
 
-// Presence: what the other clients need to draw a player in the world (client remotePlayers.js).
-// Relayed through the roster as sent, only bounded here -- like the rest of the game it is
-// client-authoritative and purely cosmetic.
+// Presence: what the other clients need to draw a player in the world. Relayed through the
+// roster as sent, only bounded here -- like the rest of the game it is client-authoritative and
+// purely cosmetic. The server-set fields (`zone`, `escapes`) are never touched here.
 
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
-const isId = (v: unknown): v is string => typeof v === "string" && ID_PATTERN.test(v);
+const b = POSE_BOUNDS;
+const clampXZ = (v: number) => clamp(v, -b.xz, b.xz);
+const clampY = (v: number) => clamp(v, b.yMin, b.yMax);
 
-// `pose` { x, y, z, yaw, speed }: the boat's feet position in TRACK coordinates (z minus the
-// sender's race scroll, so racers line up in everyone's lane), heading (rad) and speed (m/s).
+// `pose` { x, y, z, yaw, speed, grounded, crouch, grab, gx, gy, gz, held, out }: the player's feet
+// position (m), heading (rad), speed (m/s), whether they stand on the floor, crouch, stretch their
+// grabber arms (towards the grab point gx/gy/gz), are held in Grandpa's hand or are out of the heist.
+// Every field is optional; a missing or malformed one keeps its last value.
 export function applyPose(p: PlayerState, msg: unknown): void {
   if (!msg || typeof msg !== "object") return;
   const m = msg as Record<string, unknown>;
-  const b = POSE_BOUNDS;
-  if (finite(m.x)) p.x = clamp(m.x, -b.xy, b.xy);
-  if (finite(m.y)) p.y = clamp(m.y, -b.xy, b.xy);
-  if (finite(m.z)) p.z = clamp(m.z, -b.z, b.xy);
+  if (finite(m.x)) p.x = clampXZ(m.x);
+  if (finite(m.y)) p.y = clampY(m.y);
+  if (finite(m.z)) p.z = clampXZ(m.z);
   if (finite(m.yaw)) p.yaw = Math.atan2(Math.sin(m.yaw), Math.cos(m.yaw));
   if (finite(m.speed)) p.speed = clamp(m.speed, 0, b.speed);
+  if (typeof m.grounded === "boolean") p.grounded = m.grounded;
+  if (typeof m.crouch === "boolean") p.crouch = m.crouch;
+  if (typeof m.grab === "boolean") p.grab = m.grab;
+  if (finite(m.gx)) p.gx = clampXZ(m.gx);
+  if (finite(m.gy)) p.gy = clampY(m.gy);
+  if (finite(m.gz)) p.gz = clampXZ(m.gz);
+  if (typeof m.held === "boolean") p.held = m.held;
+  if (typeof m.out === "boolean") p.out = m.out;
 }
 
-// `loadout` { boat, engine, trail, partner, pets: [{ kind, tier }], world }: equipped catalog ids
-// ("" = none) and the world the player is in (clients only draw players in their own world). Pets travel as "kind:tier" joined by commas, capped at PRESENCE_PETS_MAX.
-export function applyLoadout(p: PlayerState, msg: unknown): void {
-  if (!msg || typeof msg !== "object") return;
-  const m = msg as Record<string, unknown>;
-  for (const key of ["boat", "engine", "trail", "partner", "world"] as const) {
-    const v = m[key];
-    if (v === "" || isId(v)) p[key] = v as string;
-  }
-  if (Array.isArray(m.pets)) {
-    const pets: string[] = [];
-    for (const pet of m.pets) {
-      if (pets.length >= PRESENCE_PETS_MAX) break;
-      const k = (pet as { kind?: unknown })?.kind;
-      const t = (pet as { tier?: unknown })?.tier;
-      if (isId(k) && Number.isInteger(t) && (t as number) >= 0 && (t as number) < PET_TIERS_MAX) pets.push(`${k}:${t}`);
-    }
-    p.pets = pets.join(",");
-  }
+// `emote` { id }: the portal emote the sender is playing ("" = stopped). Catalogue ids are opaque
+// slugs; anything else is ignored. Ownership is Boxity's business, not ours.
+export function applyEmote(p: PlayerState, msg: unknown): void {
+  const id = (msg as { id?: unknown })?.id;
+  if (id === "" || (typeof id === "string" && ID_PATTERN.test(id))) p.emote = id;
 }
 
 // `setAvatar` { avatar }: the Bloxity look as an opaque JSON string ("" = default), length-capped.

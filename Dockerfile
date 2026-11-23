@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1
+# Tiny Thieves: Grandpa's House game server (be-tiny-and-rob-grandpa-server), deployed to Bloxity Legion.
 FROM node:22-alpine AS build
 WORKDIR /app
 
