@@ -1,6 +1,6 @@
 import { MongoClient, type Collection } from "mongodb";
 
-import { LEADERBOARD_STATS } from "./constants.js";
+import { LEADERBOARD_FIELDS, LEADERBOARD_STATS, type GadgetId, type StatKey, type UpgradeId } from "./constants.js";
 
 // Bloxity Legion hosting injects MONGODB_URI per game+channel -- an isolated database with
 // scoped credentials. A local `npm start` normally has no Mongo reachable, so a missing or
@@ -11,48 +11,27 @@ import { LEADERBOARD_STATS } from "./constants.js";
 export interface PlayerDoc {
   _id: string; // Bloxity user id -- see WorldRoom.ts (guests are never saved)
   username?: string; // display name as of the last save
-  trophies?: number; // Wins (the HUD's trophy counter, the shop currency)
-  gems?: number;
-  energy?: number; // lightning (rebirth.js), the race speed
-  rebirths?: number;
-  autoRebirth?: boolean;
-  bestDistance?: number; // personal best race, studs (only ever goes up)
-  playtime?: number; // s with the game visible
-  boats?: string[]; // owned boat ids (client BOATS.list)
-  boat?: string; // the equipped boat (an owned one)
-  engines?: string[]; // owned engine ids (client engine.js ENGINES)
-  engine?: string; // the equipped engine, "" = none
-  partners?: string[]; // owned partner ids (client PARTNER.partners)
-  partner?: string; // the equipped partner, "" = none
-  trails?: string[]; // owned trail ids (client TRAILS.list)
-  trail?: string; // the equipped trail, "" = none
-  pets?: SavedPet[]; // owned pets (client pets.js), at most PETS_MAX
-  petSlots?: number; // pets equipped at once
-  petStorage?: number; // pets owned at most
-  eggsSeen?: string[]; // pet kinds ever hatched (client eggs.js: the NEW! tag)
-  world?: string; // the world the player was in (client worlds.js WORLDS), "" = the start world
-  worldsUnlocked?: string[]; // worlds whose portal requirement was met once (they stay open)
-  giftTime?: number; // Online Gifts clock, s online this round
-  giftsClaimed?: number[]; // GIFTS.list indexes claimed this round
-  potions?: Record<string, number>; // potion id -> count (gifts.js)
+  coins?: number; // coins on hand (earned by escaping, spent on gadgets / upgrades / Break Free / Revive)
+  upgrades?: SavedUpgrades; // upgrade levels 0..UPGRADE_MAX
+  gadgets?: SavedGadgets; // gadget id -> how many the player holds
+  stats?: SavedStats; // lifetime stats: only ever grow (saved with $max)
+  tutorialDone?: boolean;
+  prefs?: SavedPrefs; // the in-game Settings window
   lastSeen?: number; // epoch ms of the last activity
-  // Spin wheel (spin.ts): written only by the server's `spin` handler, never by saveProgress.
-  spins?: number; // spins ready to use
-  spinAt?: number; // epoch ms the next free spin arrives
-  // Daily Reward (daily.ts): written by the server only, never by saveProgress.
-  dailyDay?: number; // days unlocked this cycle
-  dailyLast?: number; // UTC day index of the last unlock
-  dailyClaimed?: number[]; // claimed day indexes this cycle
   version: number;
   updatedAt: Date;
 }
 
-// One owned pet: its kind (client PETS.kinds key) and craft tier (index into PETS.tiers).
-export interface SavedPet {
-  kind: string;
-  tier: number;
-  equipped: boolean;
-  locked: boolean;
+export type SavedUpgrades = Record<UpgradeId, number>;
+export type SavedGadgets = Partial<Record<GadgetId, number>>;
+// heists played, escapes, times caught, loot stolen, coins earned, best crew haul, jobs done.
+export type SavedStats = Record<StatKey, number>;
+
+// The in-game Settings window: music and sound effects on/off.
+export interface SavedPrefs {
+  music: boolean;
+  sfx: boolean;
+  lights: boolean;
 }
 
 let client: MongoClient | null = null;
@@ -72,7 +51,8 @@ export async function connectDb(): Promise<void> {
     console.log("[db] connected to MongoDB");
     // The leaderboards sort and count by these (leaderboard.ts).
     for (const stat of LEADERBOARD_STATS) {
-      players.createIndex({ [stat]: -1 }).catch((err) => console.warn(`[db] index on ${stat} failed`, err));
+      const field = LEADERBOARD_FIELDS[stat];
+      players.createIndex({ [field]: -1 }).catch((err) => console.warn(`[db] index on ${field} failed`, err));
     }
   } catch (err) {
     console.warn("[db] connect failed -- player progress will not persist:", err);
