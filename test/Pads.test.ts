@@ -34,7 +34,10 @@ describe("pads and heists", () => {
   afterEach(() => __setPadTimingForTest(null));
 
   const pad = (i: number) => room.state.pads.at(i)!;
+  // The running heist `p` is in (undefined once it ended).
+  const heistOf = (p: Player) => [...room.state.heists].find((h) => h.crew.includes(p.sid));
   const zone = (p: Player) => room.state.players.get(p.sid)!.zone;
+  const zoneOf = (p: Player) => `h${heistOf(p)!.id}`;
   // Players on pad `i`, launched by driving the pad clock past the countdown.
   async function crewOn(i: number, n: number) {
     const ps: Player[] = [];
@@ -52,8 +55,8 @@ describe("pads and heists", () => {
   it("creates 3 pads (all normal) and holds 12 players", async () => {
     assert.strictEqual(room.state.pads.length, 3);
     assert.deepStrictEqual([...room.state.pads].map((p) => p.difficulty), ["normal", "normal", "normal"]);
-    assert.deepStrictEqual([...room.state.pads].map((p) => p.target), [1000, 1000, 1000]);
-    assert.deepStrictEqual([...room.state.pads].map((p) => [p.index, p.startsAt, p.running, p.members.length]), [[0, 0, false, 0], [1, 0, false, 0], [2, 0, false, 0]]);
+    assert.deepStrictEqual([...room.state.pads].map((p) => [p.index, p.startsAt, p.members.length]), [[0, 0, 0], [1, 0, 0], [2, 0, 0]]);
+    assert.strictEqual(room.state.heists.length, 0);
     assert.strictEqual(ROOM_MAX_CLIENTS, 12);
     for (let i = 0; i < ROOM_MAX_CLIENTS; i++) await colyseus.connectTo(room as any, {});
     await assert.rejects(colyseus.connectTo(room as any, {}), "a 13th player is refused (the matchmaker opens another room)");
@@ -126,30 +129,44 @@ describe("pads and heists", () => {
     await sleep(60);
     const startsAt = pad(2).startsAt;
     room.tickPads(startsAt - 1);
-    assert.strictEqual(pad(2).running, false, "not before startsAt");
+    assert.strictEqual(room.state.heists.length, 0, "not before startsAt");
     room.tickPads(startsAt);
     await sleep(120);
-    const p2 = pad(2);
-    assert.strictEqual(p2.running, true);
-    assert.deepStrictEqual([...p2.crew], [a.sid, b.sid, c.sid]);
-    assert.deepStrictEqual([[...p2.members], p2.startsAt, p2.host, p2.money, p2.target], [[], 0, a.sid, 0, 1000]);
-    assert.ok(Number.isInteger(p2.seed) && p2.seed >= 0 && p2.seed <= 0xffffffff);
-    assert.ok(typeof p2.heistId === "string" && p2.heistId.length > 0);
-    assert.deepStrictEqual([zone(a), zone(b), zone(c), zone(lobby)], ["h2", "h2", "h2", "lobby"]);
+    assert.strictEqual(room.state.heists.length, 1);
+    const h = room.state.heists.at(0)!;
+    assert.deepStrictEqual([...h.crew], [a.sid, b.sid, c.sid]);
+    assert.deepStrictEqual([[...pad(2).members], pad(2).startsAt], [[], 0], "the pad is free again at once");
+    assert.deepStrictEqual([h.pad, h.host, h.money, h.target], [2, a.sid, 0, 1000]);
+    assert.ok(Number.isInteger(h.seed) && h.seed >= 0 && h.seed <= 0xffffffff);
+    assert.ok(typeof h.id === "string" && h.id.length > 0);
+    assert.deepStrictEqual([zone(a), zone(b), zone(c), zone(lobby)], [`h${h.id}`, `h${h.id}`, `h${h.id}`, "lobby"]);
     for (const p of [a, b, c]) {
       assert.deepStrictEqual(p.of("heistStart"), [
-        { pad: 2, heistId: p2.heistId, seed: p2.seed, difficulty: "normal", target: 1000, host: a.sid, crew: [a.sid, b.sid, c.sid] },
+        { pad: 2, heistId: h.id, seed: h.seed, difficulty: "normal", target: 1000, host: a.sid, crew: [a.sid, b.sid, c.sid] },
       ]);
     }
     assert.deepStrictEqual(lobby.of("heistStart"), [], "only the crew gets it");
-    assert.strictEqual((lobby.c.state as any).pads[2].running, true, "the lobby sees the pad running");
+    assert.strictEqual((lobby.c.state as any).heists.length, 1, "the lobby sees the heist");
 
-    // In a heist: no pads; a running pad takes nobody.
+    // In a heist: no pads for the crew; the launched pad takes a new crew right away.
     a.c.send("joinPad", { pad: 0 });
     lobby.c.send("joinPad", { pad: 2 });
     await sleep(80);
     assert.deepStrictEqual([...pad(0).members], []);
-    assert.deepStrictEqual([...pad(2).members], []);
+    assert.deepStrictEqual([...pad(2).members], [lobby.sid]);
+  });
+
+  it("runs several heists from the same pad at once, each in its own zone", async () => {
+    const [a] = await crewOn(0, 1);
+    const [b] = await crewOn(0, 1);
+    assert.strictEqual(room.state.heists.length, 2);
+    assert.notStrictEqual(zone(a), zone(b));
+    a.c.send("hs", { t: 1 });
+    await sleep(80);
+    assert.deepStrictEqual(b.of("hs"), [], "heists never see each other");
+    a.c.send("steal", { value: 200 });
+    await sleep(80);
+    assert.deepStrictEqual([heistOf(a)!.money, heistOf(b)!.money], [200, 0]);
   });
 
   it("launches on the room clock", async () => {
@@ -157,11 +174,12 @@ describe("pads and heists", () => {
     const a = await player(colyseus, room);
     a.c.send("joinPad", { pad: 1 });
     await sleep(150);
-    assert.strictEqual(pad(1).running, false);
+    assert.strictEqual(room.state.heists.length, 0);
     await sleep(600);
-    assert.strictEqual(pad(1).running, true);
+    assert.strictEqual(room.state.heists.length, 1);
     assert.strictEqual(a.of("heistStart").length, 1);
-    assert.strictEqual(zone(a), "h1");
+    assert.strictEqual(zone(a), zoneOf(a));
+    assert.strictEqual(heistOf(a)!.pad, 1);
   });
 
   it("relays the host snapshot (hs) to the rest of the crew only, never echoed, size-capped", async () => {
@@ -216,8 +234,8 @@ describe("pads and heists", () => {
     a.c.send("steal", {});
     b.c.send("steal", { value: 500 });
     await sleep(100);
-    assert.strictEqual(pad(0).money, 150 + STEAL_MAX);
-    assert.strictEqual((b.c.state as any).pads[0].money, 150 + STEAL_MAX, "the crew sees the bank");
+    assert.strictEqual(heistOf(a)!.money, 150 + STEAL_MAX);
+    assert.strictEqual((b.c.state as any).heists[0].money, 150 + STEAL_MAX, "the crew sees the bank");
   });
 
   it("sends escaped / leaveHeist players back to the lobby, counting escapes", async () => {
@@ -231,8 +249,8 @@ describe("pads and heists", () => {
     assert.deepStrictEqual([zone(b), ps(b).escapes], ["lobby", 1]);
     assert.deepStrictEqual([zone(c), ps(c).escapes], ["lobby", 0]);
     assert.strictEqual(ps(lobby).escapes, 0);
-    assert.deepStrictEqual([...pad(1).crew], [a.sid]);
-    assert.strictEqual(pad(1).host, a.sid, "the host stays");
+    assert.deepStrictEqual([...heistOf(a)!.crew], [a.sid]);
+    assert.strictEqual(heistOf(a)!.host, a.sid, "the host stays");
     assert.deepStrictEqual([b.of("hostChanged"), a.of("hostChanged")], [[], []]);
     b.c.send("escaped"); // already out
     await sleep(80);
@@ -244,11 +262,12 @@ describe("pads and heists", () => {
 
   it("hands the heist to the next crew member when the host leaves (hostChanged)", async () => {
     const [a, b, c] = await crewOn(2, 3);
+    const id = heistOf(a)!.id;
     a.c.send("leaveHeist");
     await sleep(100);
-    assert.strictEqual(pad(2).host, b.sid);
-    assert.deepStrictEqual(b.of("hostChanged"), [{ pad: 2, host: b.sid }]);
-    assert.deepStrictEqual(c.of("hostChanged"), [{ pad: 2, host: b.sid }]);
+    assert.strictEqual(heistOf(b)!.host, b.sid);
+    assert.deepStrictEqual(b.of("hostChanged"), [{ heistId: id, host: b.sid }]);
+    assert.deepStrictEqual(c.of("hostChanged"), [{ heistId: id, host: b.sid }]);
     assert.deepStrictEqual(a.of("hostChanged"), [], "the one who left is not told");
     // the new host's snapshots now relay; the old one's don't
     b.c.send("hs", { t: 2 });
@@ -258,35 +277,35 @@ describe("pads and heists", () => {
     // the host leaving the room hands over too
     await b.c.leave();
     await sleep(150);
-    assert.strictEqual(pad(2).host, c.sid);
-    assert.deepStrictEqual(c.of("hostChanged"), [{ pad: 2, host: b.sid }, { pad: 2, host: c.sid }]);
-    assert.deepStrictEqual([...pad(2).crew], [c.sid]);
+    assert.strictEqual(heistOf(c)!.host, c.sid);
+    assert.deepStrictEqual(c.of("hostChanged"), [{ heistId: id, host: b.sid }, { heistId: id, host: c.sid }]);
+    assert.deepStrictEqual([...heistOf(c)!.crew], [c.sid]);
   });
 
-  it("resets the pad when its crew is empty, and tells the room (heistOver)", async () => {
+  it("ends the heist when its crew is empty, and tells the room (heistOver)", async () => {
     const lobby = await player(colyseus, room);
     const [a, b] = await crewOn(2, 2);
+    const id = heistOf(a)!.id;
     a.c.send("steal", { value: 300 });
     b.c.send("escaped");
     await sleep(80);
-    assert.strictEqual(pad(2).running, true, "still running while someone is in");
+    assert.strictEqual(room.state.heists.length, 1, "still running while someone is in");
     a.c.send("escaped");
     await sleep(100);
-    const p2 = pad(2);
-    assert.deepStrictEqual([p2.running, [...p2.crew], p2.host, p2.money, p2.heistId, p2.startsAt], [false, [], "", 0, "", 0]);
-    assert.deepStrictEqual(lobby.of("heistOver"), [{ pad: 2 }]);
-    assert.deepStrictEqual(a.of("heistOver"), [{ pad: 2 }]);
-    assert.strictEqual((lobby.c.state as any).pads[2].running, false);
+    assert.strictEqual(room.state.heists.length, 0);
+    assert.deepStrictEqual(lobby.of("heistOver"), [{ heistId: id, pad: 2 }]);
+    assert.deepStrictEqual(a.of("heistOver"), [{ heistId: id, pad: 2 }]);
+    assert.strictEqual((lobby.c.state as any).heists.length, 0);
     lobby.c.send("joinPad", { pad: 2 });
     await sleep(80);
     assert.deepStrictEqual([...pad(2).members], [lobby.sid], "the pad takes a new crew");
   });
 
-  it("resets the pad when the last crew member leaves the room", async () => {
+  it("ends the heist when the last crew member leaves the room", async () => {
     const [a] = await crewOn(0, 1);
-    assert.strictEqual(pad(0).running, true);
+    assert.strictEqual(room.state.heists.length, 1);
     await a.c.leave();
     await sleep(150);
-    assert.deepStrictEqual([pad(0).running, [...pad(0).crew], pad(0).host], [false, [], ""]);
+    assert.strictEqual(room.state.heists.length, 0);
   });
 });

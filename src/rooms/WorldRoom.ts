@@ -1,5 +1,5 @@
 import { Room, Client, CloseCode } from "colyseus";
-import { WorldState, PlayerState, type PadState } from "./schema/WorldState.js";
+import { WorldState, PlayerState, type HeistState } from "./schema/WorldState.js";
 import {
   HA_MAX_BYTES, HB_MAX_BYTES, HS_MAX_BYTES, LEADERBOARD_EVERY_MS, NAME_MAX, PAD_TICK_MS, PFP_MAX_LEN, RECONNECT_SECONDS,
   PRIVATE_KEEPALIVE_MS, ROOM_MAX_CLIENTS, ZONE_LOBBY,
@@ -9,7 +9,7 @@ import { maxStats, sanitizeProgress } from "../sanitize.js";
 import { addPlayerSource, verifyAdReward, verifyPlayer, type ReportedPlayer, type VerifiedUser } from "../bloxity.js";
 import { applyAvatar, applyEmote, applyPose } from "../presence.js";
 import { ranksOf, topBoards } from "../leaderboard.js";
-import { createPads, crewPadOf, duePads, fitsPayload, heistStartOf, joinPad, launchPad, leaveCrew, leavePad, steal } from "../pads.js";
+import { createPads, crewHeistOf, duePads, fitsPayload, heistStartOf, joinPad, launchPad, leaveCrew, leavePad, steal } from "../pads.js";
 
 function sanitizeName(raw: unknown): string {
   return typeof raw === "string" ? raw.slice(0, NAME_MAX) : "";
@@ -114,14 +114,14 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     hs: (client: Client, msg: unknown) => this.relayFromHost(client, "hs", msg, HS_MAX_BYTES),
     hb: (client: Client, msg: unknown) => this.relayFromHost(client, "hb", msg, HB_MAX_BYTES),
     ha: (client: Client, msg: unknown) => {
-      const pad = crewPadOf(this.state, client.sessionId);
-      if (!pad || pad.host === client.sessionId || !fitsPayload(msg, HA_MAX_BYTES)) return;
-      this.sendTo(pad.host, "ha", { ...msg, from: client.sessionId });
+      const heist = crewHeistOf(this.state, client.sessionId);
+      if (!heist || heist.host === client.sessionId || !fitsPayload(msg, HA_MAX_BYTES)) return;
+      this.sendTo(heist.host, "ha", { ...msg, from: client.sessionId });
     },
     // Loot out of the house: the host banks its value for the crew.
     steal: (client: Client, msg: { value?: unknown }) => {
-      const pad = crewPadOf(this.state, client.sessionId);
-      if (pad && pad.host === client.sessionId) steal(pad, msg?.value);
+      const heist = crewHeistOf(this.state, client.sessionId);
+      if (heist && heist.host === client.sessionId) steal(heist, msg?.value);
     },
     // The sender got away through the van (counted in `escapes`), or quit the heist for the lobby.
     escaped: (client: Client) => this.exitHeist(client.sessionId, true),
@@ -204,29 +204,29 @@ export class WorldRoom extends Room<{ state: WorldState }> {
   // crew and each of them gets `heistStart`. Public so the tests can drive the pad clock.
   tickPads(now: number) {
     for (const pad of duePads(this.state, now)) {
-      const crew = launchPad(this.state, pad);
-      if (!crew.length) continue;
-      const start = heistStartOf(pad);
-      for (const sid of crew) this.sendTo(sid, "heistStart", start);
+      const heist = launchPad(this.state, pad);
+      if (!heist) continue;
+      const start = heistStartOf(heist);
+      for (const sid of heist.crew) this.sendTo(sid, "heistStart", start);
     }
   }
 
   // `hs` / `hb`: from the host of a running pad only, to every other crew member (never echoed back).
   private relayFromHost(client: Client, type: string, msg: unknown, maxBytes: number) {
-    const pad = crewPadOf(this.state, client.sessionId);
-    if (!pad || pad.host !== client.sessionId || !fitsPayload(msg, maxBytes)) return;
-    for (const sid of pad.crew) if (sid !== client.sessionId) this.sendTo(sid, type, msg);
+    const heist = crewHeistOf(this.state, client.sessionId);
+    if (!heist || heist.host !== client.sessionId || !fitsPayload(msg, maxBytes)) return;
+    for (const sid of heist.crew) if (sid !== client.sessionId) this.sendTo(sid, type, msg);
   }
 
   // Takes a session out of its heist (pads.ts leaveCrew) and tells the rest of the crew about a new host;
-  // when the last one is out the pad resets and the room hears `heistOver`.
+  // when the last one is out the heist ends and the room hears `heistOver`.
   private exitHeist(sessionId: string, escaped: boolean) {
     const left = leaveCrew(this.state, sessionId);
     if (!left) return;
     const p = this.state.players.get(sessionId);
     if (escaped && p) p.escapes += 1;
-    if (left.hostChanged) this.sendToCrew(left.pad, "hostChanged", { pad: left.pad.index, host: left.pad.host });
-    if (left.ended) this.broadcast("heistOver", { pad: left.pad.index });
+    if (left.hostChanged) this.sendToCrew(left.heist, "hostChanged", { heistId: left.heist.id, host: left.heist.host });
+    if (left.ended) this.broadcast("heistOver", { heistId: left.heist.id, pad: left.heist.pad });
   }
 
   private sendTo(sessionId: string, type: string, msg: unknown) {
@@ -239,8 +239,8 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     }
   }
 
-  private sendToCrew(pad: PadState, type: string, msg: unknown) {
-    for (const sid of pad.crew) this.sendTo(sid, type, msg);
+  private sendToCrew(heist: HeistState, type: string, msg: unknown) {
+    for (const sid of heist.crew) this.sendTo(sid, type, msg);
   }
 
   private reportedPlayers(): ReportedPlayer[] {

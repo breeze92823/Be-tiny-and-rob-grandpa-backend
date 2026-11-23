@@ -59,7 +59,7 @@ export const HS_MAX_BYTES = 24 * 1024; // host snapshot
 export const HA_MAX_BYTES = 4 * 1024; // crew action
 export const HB_MAX_BYTES = 8 * 1024; // host event
 export const STEAL_MAX = 2000;
-// A player's zone (PlayerState.zone, server-set): the lobby, or "h<pad index>" while in that pad's heist.
+// A player's zone (PlayerState.zone, server-set): the lobby, or "h<heist id>" while in that heist.
 export const ZONE_LOBBY = "lobby";
 
 // Leaderboards (leaderboard.ts): the stats ranked, the saved doc field each one reads, rows per

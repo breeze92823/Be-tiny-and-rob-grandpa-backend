@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import {
   HEIST_TARGETS, PAD_COUNT, PAD_COUNTDOWN_MS, PAD_DIFFICULTIES, PAD_FULL_COUNTDOWN_MS, PAD_SIZE, STEAL_MAX, ZONE_LOBBY,
 } from "./constants.js";
-import { PadState, type WorldState } from "./rooms/schema/WorldState.js";
+import { HeistState, PadState, type WorldState } from "./rooms/schema/WorldState.js";
 
 // The lobby's crew pads and the heists they launch. Pure state changes on WorldState; WorldRoom
 // sends the messages (heistStart, hostChanged, heistOver) and relays the heist traffic.
@@ -20,7 +20,6 @@ export function createPads(state: WorldState): void {
     const pad = new PadState();
     pad.index = i;
     pad.difficulty = PAD_DIFFICULTIES[i];
-    pad.target = HEIST_TARGETS[PAD_DIFFICULTIES[i]];
     state.pads.push(pad);
   }
 }
@@ -46,11 +45,12 @@ export function leavePad(state: WorldState, sid: string): boolean {
   return left;
 }
 
-// `joinPad` { pad }: only from the lobby (checked by the caller), onto an idle pad with room. Moves the
+// `joinPad` { pad }: only from the lobby (checked by the caller), onto a pad with room (a launched pad is
+// empty again at once, so it never waits on a running heist). Moves the
 // session off any other pad. The first member starts the countdown; a full pad shortens it.
 export function joinPad(state: WorldState, sid: string, index: unknown, now: number): boolean {
   const pad = padAt(state, index);
-  if (!pad || pad.running) return false;
+  if (!pad) return false;
   if (pad.members.includes(sid)) return true;
   if (pad.members.length >= PAD_SIZE) return false;
   leavePad(state, sid);
@@ -63,86 +63,80 @@ export function joinPad(state: WorldState, sid: string, index: unknown, now: num
 // Pads whose countdown has run out (with someone on them).
 export function duePads(state: WorldState, now: number): PadState[] {
   const due: PadState[] = [];
-  for (const pad of state.pads) if (!pad.running && pad.members.length > 0 && pad.startsAt > 0 && pad.startsAt <= now) due.push(pad);
+  for (const pad of state.pads) if (pad.members.length > 0 && pad.startsAt > 0 && pad.startsAt <= now) due.push(pad);
   return due;
 }
 
-// Launches a pad's heist: its members become the crew (the first one hosts), the pad gets a fresh seed
-// and heist id, and every crew player moves to the heist's zone. Returns the crew (empty = nothing
-// launched).
-export function launchPad(state: WorldState, pad: PadState): string[] {
+// Launches a pad's heist: its members become the crew of a new HeistState (the first one hosts, fresh seed
+// and heist id) and every crew player moves to the heist's zone. The pad itself is idle again at once.
+// Returns the new heist (null = nothing launched).
+export function launchPad(state: WorldState, pad: PadState): HeistState | null {
   const crew = [...pad.members].filter((sid) => state.players.has(sid));
   pad.members.clear();
   pad.startsAt = 0;
-  if (!crew.length) return [];
-  pad.crew.clear();
-  for (const sid of crew) pad.crew.push(sid);
-  pad.running = true;
-  pad.host = crew[0];
-  pad.seed = randomBytes(4).readUInt32LE(0);
-  pad.money = 0;
-  pad.target = HEIST_TARGETS[pad.difficulty as keyof typeof HEIST_TARGETS] ?? HEIST_TARGETS.normal;
-  pad.heistId = randomBytes(6).toString("base64url");
+  if (!crew.length) return null;
+  const heist = new HeistState();
+  heist.id = randomBytes(6).toString("base64url");
+  heist.pad = pad.index;
+  heist.difficulty = pad.difficulty;
+  for (const sid of crew) heist.crew.push(sid);
+  heist.host = crew[0];
+  heist.seed = randomBytes(4).readUInt32LE(0);
+  heist.money = 0;
+  heist.target = HEIST_TARGETS[pad.difficulty as keyof typeof HEIST_TARGETS] ?? HEIST_TARGETS.normal;
+  state.heists.push(heist);
   for (const sid of crew) {
     const p = state.players.get(sid)!;
-    p.zone = `h${pad.index}`;
+    p.zone = `h${heist.id}`;
     p.held = false;
     p.out = false;
   }
-  return crew;
+  return heist;
 }
 
 // What each crew client gets when its heist launches (`heistStart`).
-export function heistStartOf(pad: PadState) {
-  return { pad: pad.index, heistId: pad.heistId, seed: pad.seed, difficulty: pad.difficulty, target: pad.target, host: pad.host, crew: [...pad.crew] };
+export function heistStartOf(heist: HeistState) {
+  return { pad: heist.pad, heistId: heist.id, seed: heist.seed, difficulty: heist.difficulty, target: heist.target, host: heist.host, crew: [...heist.crew] };
 }
 
-// The running pad whose crew holds this session.
-export function crewPadOf(state: WorldState, sid: string): PadState | undefined {
-  for (const pad of state.pads) if (pad.running && pad.crew.includes(sid)) return pad;
+// The running heist whose crew holds this session.
+export function crewHeistOf(state: WorldState, sid: string): HeistState | undefined {
+  for (const heist of state.heists) if (heist.crew.includes(sid)) return heist;
   return undefined;
 }
 
 // `steal` { value } from the host: the crew bank grows by the value, rounded and clamped 0..STEAL_MAX.
-export function steal(pad: PadState, value: unknown): void {
+export function steal(heist: HeistState, value: unknown): void {
   if (typeof value !== "number" || !Number.isFinite(value)) return;
-  pad.money += Math.min(STEAL_MAX, Math.max(0, Math.round(value)));
+  heist.money += Math.min(STEAL_MAX, Math.max(0, Math.round(value)));
 }
 
 export interface CrewLeft {
-  pad: PadState;
-  hostChanged: boolean; // the host left and the next crew member took over (pad.host)
-  ended: boolean; // the crew is empty: the pad was reset
+  heist: HeistState;
+  hostChanged: boolean; // the host left and the next crew member took over (heist.host)
+  ended: boolean; // the crew is empty: the heist was removed
 }
 
 // Takes a session out of its heist (escaped, leaveHeist, gone from the room): back to the lobby zone.
-// A leaving host hands over to the next crew member; the last one out resets the pad.
+// A leaving host hands over to the next crew member; the last one out ends the heist.
 export function leaveCrew(state: WorldState, sid: string): CrewLeft | null {
-  const pad = crewPadOf(state, sid);
-  if (!pad) return null;
-  remove(pad.crew, sid);
+  const heist = crewHeistOf(state, sid);
+  if (!heist) return null;
+  remove(heist.crew, sid);
   const p = state.players.get(sid);
   if (p) {
     p.zone = ZONE_LOBBY;
     p.held = false;
     p.out = false;
   }
-  if (pad.crew.length === 0) {
-    resetPad(pad);
-    return { pad, hostChanged: false, ended: true };
+  if (heist.crew.length === 0) {
+    const i = state.heists.indexOf(heist);
+    if (i >= 0) state.heists.splice(i, 1);
+    return { heist, hostChanged: false, ended: true };
   }
-  if (pad.host !== sid) return { pad, hostChanged: false, ended: false };
-  pad.host = pad.crew.at(0)!;
-  return { pad, hostChanged: true, ended: false };
-}
-
-// A pad with no heist: idle, ready for the next crew.
-export function resetPad(pad: PadState): void {
-  pad.running = false;
-  pad.crew.clear();
-  pad.host = "";
-  pad.money = 0;
-  pad.heistId = "";
+  if (heist.host !== sid) return { heist, hostChanged: false, ended: false };
+  heist.host = heist.crew.at(0)!;
+  return { heist, hostChanged: true, ended: false };
 }
 
 // The heist relay's payloads are opaque objects; anything else, or one whose JSON is over `maxBytes`,
